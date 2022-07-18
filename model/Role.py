@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
-from app import db
+from flask_sqlalchemy import SQLAlchemy
 from config import app_config, app_active
 
 config = app_config[app_active]
+db = SQLAlchemy(config.APP)
 
 
 class Role(db.Model):
@@ -11,5 +12,9 @@ class Role(db.Model):
     Args:
         db (_type_): _description_
     """
+
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String(40), unique=True, nullable=False)
+
+    def __repr__(self):
+        return self.name

@@ -1,100 +1,311 @@
 # -*- coding: utf-8 _*_
 from unittest import result
-from flask import Flask, request, redirect, render_template
-from config import app_config, app_active
-from controller.User import UserController
+from flask import Flask, request, redirect,\
+    render_template, Response, json, abort
 from flask_sqlalchemy import SQLAlchemy
+from flask_bootstrap import Bootstrap
+from flask_login import LoginManager, login_user, logout_user
+from functools import wraps
 
+from config import app_config, app_active
+from admin.Admin import start_views
 
+from controller.User import UserController
+from controller.Product import ProductController
 
 config = app_config[app_active]
 db = SQLAlchemy(config.APP)
-app = Flask(__name__, template_folder='templates')
-app.config['SQLALCHEMY_DATABASE_URI'] = config.SQLALCHEMY_DATABASE_URI
-app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+app = Flask(__name__, template_folder="templates")
+app.config["SQLALCHEMY_DATABASE_URI"] = config.SQLALCHEMY_DATABASE_URI
+app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
+app.config["FLASK_ADMIN_SWATCH"] = "flatly"
 
 
 def create_app(config_name):
 
     app.secret_key = config.SECRET
     app.config.from_object(app_config[config_name])
-    app.config.from_pyfile('config.py')
+    app.config.from_pyfile("config.py")
+
+    login_manager = LoginManager()
+    login_manager.init_app(app)
+    start_views(app, db)
+    Bootstrap(app)
     db.init_app(app)
 
-    @app.route('/')
+    @app.after_request
+    def after_request(response):
+        response.headers.add("Access-Control-Allow-Origin", '*')
+        response.headers.add("Access-Control-Allow-Headers", 'Content-Type')
+        response.headers.add("Access-Control-Allow-Methods", 'GET,PUT,POST,DELETE,OPTIONS')
+        return response
+
+    def auth_token_required(f):
+        @wraps(f)
+        def verify_token(*args, **kwargs):
+            user = UserController()
+            try:
+                result = user.verify_auth_token(request.headers["access_token"])
+                if result["status"] == 200:
+                    return f(*args, **kwargs)
+                else:
+                    abort(result["status"], result["message"])
+            except KeyError as error:
+                abort(401, "Você precisa enviar um token de acesso")
+        return verify_token
+
+    @app.route("/users/<user_id>", methods=["GET"])
+    @auth_token_required
+    def get_user_profile(user_id):
+        header = {
+            "access_token": request.headers["access_token"],
+            "token_type": "JWT"
+        }
+        user = UserController()
+        response = user.get_user_by_id(user_id=user_id)
+        return Response(json.dumps(response, ensure_ascii=False),
+                        mimetype="application/json"), response["status"], header
+
+    @app.route("/products/", methods=["GET"])
+    @app.route("/products/<limit>", methods=["GET"])
+    @auth_token_required
+    def get_products(limit=None):
+        header = {
+            "access_token": request.headers["access_token"],
+            "token_type": "JWT"
+        }
+        product = ProductController()
+        response = product.get_products(limit=limit)
+        return Response(json.dumps(response, ensure_ascii=False),
+                        mimetype="application/json"), response["status"], header
+
+    @app.route("/products/<product_id>", methods=["GET"])
+    @auth_token_required
+    def get_product(product_id):
+        header = {
+            "access_token": request.headers["access_token"],
+            "token_type": "JWT"
+        }
+        product = ProductController()
+        response = product.get_product_by_id(product_id=product_id)
+        return Response(json.dumps(response, ensure_ascii=False),
+                        mimetype="application/json"), response["status"], header
+
+    @app.route("/products", methods=["POST"])
+    def save_products():
+        product = ProductController()
+
+        result = product.save_product(request.form)
+
+        if result:
+            message = "Inserido"
+        else:
+            message = "Não inserido"
+
+        return message
+
+    @app.route("/products", methods=["PUT"])
+    def update_products():
+        product = ProductController()
+
+        result = product.update_product(request.form)
+
+        if result:
+            message = "Editado"
+        else:
+            message = "Não Editado"
+        return message
+
+    @app.route("/products", methods=["DELETE"])
+    def delete_products():
+        product = ProductController()
+
+        result = product.delete_product(request.form)
+        if result:
+            message = "Deletado"
+        else:
+            message = "Não Deletado"
+        return message
+
+    @app.route("/")
     def index():
-        return 'Meu primeiro run'
+        return "Meu primeiro run"
 
-    @app.route('/login/')
+    @app.route("/login/")
     def login():
-        return 'Aqui entrará a tela de login'
+        return render_template("login.html", data={"status": 200, "msg": None, "type":None})
 
-    @app.route('/login/', methods=['POST'])
-    def login_post():
+    @app.route("/login_api/", methods=["POST"])
+    def login_api():
+        header = {}
         user = UserController()
 
-        email = request.form['email']
-        password = request.form['password']
+        email = request.json["email"]
+        password = request.json["password"]
 
+        result = user.login(email, password)
+        code = 401
+        response = {"message": "Usuário não autorizado", "result": []}
+        if result:
+            if result.active:
+                result = {
+                    "id": result.id,
+                    "username": result.username,
+                    "email": result.email,
+                    "date_created": result.date_created,
+                    "active": result.active
+                }
+
+                header = {
+                    "access_tokne": user.generate_auth_token(result),
+                    "token_type": "JWT"
+                }
+
+                code = 200
+                response["message"] = "Login realizado com sucesso"
+                response["result"] = result
+        return Response(json.dumps(response, ensure_ascii=False), mimetype="application/json"), code, header
+
+    @app.route("/login/", methods=["POST"])
+    def login_post():
+        user = UserController()
+        email = request.form["email"]
+        password = request.form["password"]
         result = user.login(email, password)
 
         if result:
-            return redirect('/admin')
+            if result.role == 4:
+                return render_template(
+                    "login.html",
+                    data={"status": 401,
+                          "msg": "Seu usuário não tem permissão para acessar o admin",
+                          "type": 2
+                          })
+            else:
+                login_user(result)
+                return redirect("/admin")
         else:
-            return render_template('login.html',
+            return render_template(
+                "login.html",
                 data={
-                    'status': 401,
-                    'msg': 'Dados de usuário incorretos',
-                    'type': None
-                }
+                    "status": 401,
+                    "msg": "Dados de usuário incorretos",
+                    "type": 1,
+                },
             )
 
-    @app.route('/recovery-password/')
+    @app.route("/recovery-password/")
     def recovery_password():
-        return 'Aqui entrará a tela de recuperar senha'
+        return render_template("recovery.html", data={"status": 200, "msg": None, "type": None})
 
-    @app.route('/recovery-password/', methods=['POST'])
+    @app.route("/recovery-password/", methods=["POST"])
     def send_recovery_password():
         user = UserController()
 
-        result = user.recovery(request.form['email'])
+        result = user.recovery(request.form["email"])
+
+        if result == 200 or result["status_code"] ==202:
+            return render_template(
+                "recovery.html",
+                data={
+                    "status": result["status_code"],
+                    "msg": "Você receberá um e-mail em sua caixa para alteração de senha",
+                    "type": 3
+                },
+            )
+        else:
+            return render_template(
+                "recovery.html",
+                data={
+                    "status": result["status_code"],
+                    "msg": result["body"],
+                    "type": 1
+                },
+            )
+
+    @app.route("/new-password/<recovery_code>")
+    def new_password(recovery_code):
+        user = UserController()
+        result = user.verify_auth_token(recovery_code)
+        if result["status"] == 200:
+            response = user.get_user_by_recovery(str(recovery_code))
+            if response is not None:
+                return render_template("new_password.html", data={"status": result["status"], "msg": None,
+                                                                  "type": None, "user_id": response.id})
+            else:
+                return render_template("new_password.html",
+                                       data={"status": 400,
+                                             "msg": "Erro ao tentar acessar os dados do usuário, "
+                                                    "tente novamente mais tarde!",
+                                             "type": 1})
+        else:
+            return render_template("new_password.html",
+                                   data={"status": result["status"],
+                                         "msg": "Token expirado ou inválid, solicite novamente a alteração"
+                                                "da senha",
+                                         "type": 1})
+
+    @app.route("/new-password/", methods=["POST"])
+    def send_new_passeord():
+        user = UserController()
+        user_id = request.form["user_id"]
+        password = request.form["password"]
+
+        result = user.new_password(user_id, password)
 
         if result:
-            return render_template('recovery.html', 
-            data={
-                'status': 200,
-                'msg': 'E-mail de recuperação enviado com sucesso!',
-            })
+            return render_template("new_password.html",
+                                   data={"status": 200,
+                                         "msg": "Senha alterada com sucesso",
+                                         "type": 3,
+                                         "user_id": user_id
+                                         })
         else:
-            return render_template('recovery.html', 
-            data={
-                'status': 401,
-                'msg': 'Erro  ao enviar E-mail de recuperação!',
-            })
+            return render_template("new_password.html",
+                                   data={"status": 401,
+                                         "msg": "Erro ao alterar senha.",
+                                         "type": 1,
+                                         "user_id": user_id
+                                         })
 
+    @app.route("/profile/<int:user_id>/", methods=["GET"])
+    def get_profile(user_id):
+        return 'O ID desse usuário é %d', user_id
 
-    # @app.route('/profile/<int:user_id>/')
-    # def profile(user_id):
-    #     return 'O ID desse usuário é %d', user_id
-
-    @app.route('/profile/<int:user_id>/action/<action>/')
+    @app.route("/profile/<int:user_id>/action/<action>/")
     def profile(user_id, action):
-        return 'Ação %s usuáro de ID %d', action, user_id
+        return "Ação %s usuáro de ID %d", action, user_id
 
-    @app.route('/profile/', methods=['POST', 'GET'])
+    @app.route("/profile/", methods=["POST", "GET"])
     def create_profile():
-        username = request.form['username']
-        password = request.form['password']
+        username = request.form["username"]
+        password = request.form["password"]
 
         return f"""Essa rota possui um método POST e criará um usuário com os
             dados de usuário {username} e senha {password} """
 
-    @app.route('/profile/<int:user_id>/', methods=['PUT'])
+    @app.route("/profile/<int:user_id>/", methods=["PUT"])
     def edit_total_profile(user_id):
-        username = request.form['username']
-        password = request.form['password']
+        username = request.form["username"]
+        password = request.form["password"]
 
-        return 'Essa rota possui um método PUT e editará um usuário com os ' \
-               'dados de usuário %s e senha %s', username, password
+        return (
+            "Essa rota possui um método PUT e editará um usuário com os "
+            "dados de usuário %s e senha %s",
+            username,
+            password,
+        )
+
+    @app.route("/logout")
+    def logout_send():
+        logout_user()
+        return render_template(
+            "login.html",
+            data={"status": 200, "msg": "Usuário deslogado com sucesso!", "type": 3})
+
+    @login_manager.user_loader
+    def load_user(user_id):
+        user = UserController()
+        return user.get_admin_login(user_id)
 
     return app
